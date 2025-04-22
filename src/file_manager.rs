@@ -9,7 +9,10 @@ use std::{
     mem,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 #[derive(Clone, PartialEq, Hash)]
@@ -98,11 +101,18 @@ impl Page {
     }
 }
 
+#[derive(Default)]
+struct FileManagerStats {
+    blocks_read: AtomicU64,
+    blocks_written: AtomicU64,
+}
+
 struct FileManager {
     db_directory: PathBuf,
     block_size: usize,
     is_new: bool,
     open_files: Arc<RwLock<HashMap<String, Arc<Mutex<File>>>>>,
+    stats: FileManagerStats,
 }
 
 impl FileManager {
@@ -123,6 +133,7 @@ impl FileManager {
             block_size,
             is_new: !path_exists,
             open_files: Arc::new(RwLock::new(HashMap::new())),
+            stats: FileManagerStats::default(),
         }
     }
 
@@ -133,6 +144,7 @@ impl FileManager {
 
         f.read_exact_at(&mut p.byte_buf, offset as u64)
             .expect("failed to read page from file");
+        self.stats.blocks_read.fetch_add(1, Ordering::SeqCst);
     }
 
     fn write(&self, block: &BlockId, p: &mut Page) {
@@ -142,7 +154,8 @@ impl FileManager {
 
         f.write_all_at(&p.byte_buf, offset as u64)
             .expect("failed to write page to file");
-        f.sync_all().expect("failed to sync data to disk")
+        f.sync_all().expect("failed to sync data to disk");
+        self.stats.blocks_written.fetch_add(1, Ordering::SeqCst);
     }
 
     fn append(&self, filename: &str) -> BlockId {
