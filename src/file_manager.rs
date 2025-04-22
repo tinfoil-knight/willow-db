@@ -142,14 +142,31 @@ impl FileManager {
 
         f.write_all_at(&p.byte_buf, offset as u64)
             .expect("failed to write page to file");
+        f.sync_all().expect("failed to sync data to disk")
     }
 
     fn append(&self, filename: &str) -> BlockId {
-        todo!()
+        let block = BlockId::new(filename, self.length(filename) as usize);
+        let bytes = vec![0; self.block_size].into_boxed_slice();
+
+        let f_ptr = self.get_file(filename);
+        let f = f_ptr.lock().unwrap();
+        let offset = block.block_num * self.block_size;
+
+        f.write_all_at(&bytes, offset as u64)
+            .expect("failed to append to file");
+
+        block
     }
 
-    fn length(&self, filename: &str) -> u32 {
-        todo!()
+    fn length(&self, filename: &str) -> u64 {
+        let f_ptr = self.get_file(filename);
+        let f = f_ptr.lock().unwrap();
+
+        f.metadata()
+            .expect("failed to get number of blocks in file")
+            .len()
+            / (self.block_size as u64)
     }
 
     fn get_file(&self, filename: &str) -> Arc<Mutex<File>> {
@@ -192,6 +209,7 @@ mod tests {
                 .unwrap()
                 .as_millis()
         );
+
         let block = BlockId::new(&fname, 2);
         let mut p1 = Page::with_blocksize(fm.block_size);
 
@@ -210,6 +228,12 @@ mod tests {
         fm.read(&block, &mut p2);
 
         assert_eq!(p2.get_int(pos2), test_int);
-        assert_eq!(p2.get_string(pos1), test_str)
+        assert_eq!(p2.get_string(pos1), test_str);
+
+        assert_eq!(fm.length(&fname), 3); // page was added at start offset of block 2; (0, 1, 2) => 3 blocks so far
+
+        let appended_block = fm.append(&fname);
+        assert_eq!(appended_block.block_num, 3);
+        assert_eq!(fm.length(&fname), 4);
     }
 }
