@@ -1,4 +1,4 @@
-pub mod file_manager;
+pub mod file;
 
 fn main() {
     println!("Hello, world!");
