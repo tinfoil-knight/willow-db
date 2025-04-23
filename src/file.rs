@@ -1,12 +1,9 @@
-#![allow(dead_code)]
-
 use std::{
     borrow::Cow,
     collections::HashMap,
     fmt,
     fs::{self, File, OpenOptions},
     hash::{DefaultHasher, Hash, Hasher},
-    mem,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{
@@ -15,14 +12,16 @@ use std::{
     },
 };
 
+use crate::constants::SIZE_OF_INT;
+
 #[derive(Clone, PartialEq, Hash)]
-struct BlockId {
+pub struct BlockId {
     filename: String,
     block_num: usize,
 }
 
 impl BlockId {
-    fn new(filename: &str, block_num: usize) -> Self {
+    pub fn new(filename: &str, block_num: usize) -> Self {
         BlockId {
             filename: filename.to_owned(),
             block_num,
@@ -42,62 +41,66 @@ impl fmt::Display for BlockId {
     }
 }
 
-const SIZE_OF_I32: usize = mem::size_of::<i32>();
-
-struct Page {
+pub struct Page {
     byte_buf: Box<[u8]>,
 }
 
+impl From<Box<[u8]>> for Page {
+    fn from(b: Box<[u8]>) -> Self {
+        Page { byte_buf: b }
+    }
+}
+
 impl Page {
-    fn with_blocksize(block_size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
-            byte_buf: vec![0; block_size].into_boxed_slice(),
+            byte_buf: vec![0; size].into_boxed_slice(),
         }
     }
 
-    fn with_bytes(b: &[u8]) -> Self {
-        Self { byte_buf: b.into() }
-    }
-
-    fn get_int(&self, offset: usize) -> i32 {
+    pub fn get_int(&self, offset: usize) -> i32 {
         let bytes = self
             .byte_buf
-            .get(offset..offset + SIZE_OF_I32)
+            .get(offset..offset + SIZE_OF_INT)
             .expect("in bound");
         i32::from_le_bytes(bytes.try_into().unwrap())
     }
 
-    fn set_int(&mut self, offset: usize, n: i32) {
-        self.byte_buf[offset..offset + SIZE_OF_I32].copy_from_slice(&n.to_le_bytes());
+    pub fn set_int(&mut self, offset: usize, n: i32) {
+        self.byte_buf[offset..offset + SIZE_OF_INT].copy_from_slice(&n.to_le_bytes());
     }
 
-    fn get_bytes(&self, offset: usize) -> &[u8] {
+    pub fn get_bytes(&self, offset: usize) -> &[u8] {
         let len = self.get_int(offset);
-        let start = offset + SIZE_OF_I32;
+        let start = offset + SIZE_OF_INT;
 
         self.byte_buf
             .get(start..start + len as usize)
             .expect("range to be in bound")
     }
 
-    fn set_bytes(&mut self, offset: usize, bytes: &[u8]) {
+    pub fn set_bytes(&mut self, offset: usize, bytes: &[u8]) {
         let len = bytes.len();
         self.set_int(offset, len as i32);
 
-        let start = offset + SIZE_OF_I32;
+        let start = offset + SIZE_OF_INT;
         self.byte_buf[start..start + len].copy_from_slice(bytes);
     }
 
-    fn get_string(&self, offset: usize) -> Cow<'_, str> {
+    pub fn get_string(&self, offset: usize) -> Cow<'_, str> {
         String::from_utf8_lossy(self.get_bytes(offset))
     }
 
-    fn set_string(&mut self, offset: usize, s: &str) {
+    pub fn set_string(&mut self, offset: usize, s: &str) {
         self.set_bytes(offset, s.as_bytes());
     }
 
-    fn str_size(s: &str) -> usize {
-        SIZE_OF_I32 + s.len()
+    pub fn str_size(s: &str) -> usize {
+        SIZE_OF_INT + s.len()
+    }
+
+    pub fn contents(&self) -> &[u8] {
+        &self.byte_buf
     }
 }
 
@@ -107,16 +110,16 @@ struct FileManagerStats {
     blocks_written: AtomicU64,
 }
 
-struct FileManager {
+pub struct FileManager {
     db_directory: PathBuf,
     block_size: usize,
-    is_new: bool,
+    pub is_new: bool,
     open_files: Arc<RwLock<HashMap<String, Arc<Mutex<File>>>>>,
     stats: FileManagerStats,
 }
 
 impl FileManager {
-    fn new(db_directory: &Path, block_size: usize) -> Self {
+    pub fn new(db_directory: &Path, block_size: usize) -> Self {
         let path_exists = match db_directory.try_exists() {
             Ok(v) => v,
             Err(e) => panic!("failed to check db_directory path: {}", e),
@@ -137,7 +140,7 @@ impl FileManager {
         }
     }
 
-    fn read(&self, block: &BlockId, p: &mut Page) {
+    pub fn read(&self, block: &BlockId, p: &mut Page) {
         let f_ptr = self.get_file(&block.filename);
         let f = f_ptr.lock().unwrap();
         let offset = block.block_num * self.block_size;
@@ -147,7 +150,7 @@ impl FileManager {
         self.stats.blocks_read.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn write(&self, block: &BlockId, p: &mut Page) {
+    pub fn write(&self, block: &BlockId, p: &mut Page) {
         let f_ptr = self.get_file(&block.filename);
         let f = f_ptr.lock().unwrap();
         let offset = block.block_num * self.block_size;
@@ -158,7 +161,7 @@ impl FileManager {
         self.stats.blocks_written.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn append(&self, filename: &str) -> BlockId {
+    pub fn append(&self, filename: &str) -> BlockId {
         let block = BlockId::new(filename, self.length(filename) as usize);
         let bytes = vec![0; self.block_size].into_boxed_slice();
 
@@ -172,7 +175,7 @@ impl FileManager {
         block
     }
 
-    fn length(&self, filename: &str) -> u64 {
+    pub fn length(&self, filename: &str) -> u64 {
         let f_ptr = self.get_file(filename);
         let f = f_ptr.lock().unwrap();
 
@@ -200,6 +203,10 @@ impl FileManager {
 
         Arc::clone(map.get(filename).unwrap())
     }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
 }
 
 #[cfg(test)]
@@ -224,7 +231,7 @@ mod tests {
         );
 
         let block = BlockId::new(&fname, 2);
-        let mut p1 = Page::with_blocksize(fm.block_size);
+        let mut p1 = Page::new(fm.block_size());
 
         let pos1 = 88;
         let test_str = "abcdefg";
@@ -237,7 +244,7 @@ mod tests {
 
         fm.write(&block, &mut p1);
 
-        let mut p2 = Page::with_blocksize(fm.block_size);
+        let mut p2 = Page::new(fm.block_size());
         fm.read(&block, &mut p2);
 
         assert_eq!(p2.get_int(pos2), test_int);
