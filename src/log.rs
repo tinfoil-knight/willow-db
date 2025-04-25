@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::sync::{Arc, RwLock};
+
 use crate::{
     constants::SIZE_OF_INT,
     file::{BlockId, FileManager, Page},
@@ -8,8 +10,8 @@ use crate::{
 /// Log Sequence Number
 type Lsn = u32;
 
-struct LogManager {
-    fm: FileManager,
+struct LogManagerInner {
+    fm: Arc<FileManager>,
     logfile: String,
     logpage: Page,
     current_block: BlockId,
@@ -17,8 +19,8 @@ struct LogManager {
     last_saved_lsn: Lsn,
 }
 
-impl LogManager {
-    fn new(fm: FileManager, logfile: &str) -> Self {
+impl LogManagerInner {
+    fn new(fm: Arc<FileManager>, logfile: &str) -> Self {
         let mut logpage = Page::new(fm.block_size());
         let logsize = fm.length(logfile);
         let current_block = if logsize == 0 {
@@ -43,19 +45,26 @@ impl LogManager {
     }
 
     fn append(&mut self, record: Box<[u8]>) -> Lsn {
-        // todo: make this thread-safe
-
         let mut boundary = self.logpage.get_int(0);
         let record_size = record.len();
         let bytes_needed = record_size + SIZE_OF_INT;
 
-        if boundary as usize - bytes_needed < SIZE_OF_INT {
-            // doesn't fit so move to the next block
+        assert!(bytes_needed + SIZE_OF_INT <= self.fm.block_size());
 
+        if boundary - (bytes_needed as i32) < SIZE_OF_INT as i32 {
+            // doesn't fit so move to the next block
             self.flush();
             self.current_block = self.append_new_block();
             boundary = self.logpage.get_int(0);
         }
+
+        // records are placed right -> left
+        // boundary value is written to the start of the page
+        // this allow the log itr. to read records in reverse order (i.e. left -> right)
+        //
+        // Page: [ boundary | gap | record n | ... | record1 ]
+        // gap -> optional, in case everything doesn't fit exactly
+        // 1..n -> order in which the log was written (record1 was written first and so on..)
 
         let record_pos = boundary as usize - bytes_needed;
         self.logpage.set_bytes(record_pos, &record);
@@ -72,22 +81,105 @@ impl LogManager {
         block
     }
 
-    fn flush_till(&mut self, lsn: Lsn) {
-        if lsn > self.last_saved_lsn {
-            self.flush();
-        }
-    }
-
     fn flush(&mut self) {
         self.fm.write(&self.current_block, &mut self.logpage);
         self.last_saved_lsn = self.latest_lsn;
     }
 }
 
+struct LogManager {
+    inner: RwLock<LogManagerInner>,
+}
+
+impl LogManager {
+    fn new(fm: Arc<FileManager>, logfile: &str) -> Self {
+        Self {
+            inner: RwLock::new(LogManagerInner::new(fm, logfile)),
+        }
+    }
+
+    fn append(&mut self, record: Box<[u8]>) -> Lsn {
+        let mut state = self.inner.write().unwrap();
+        state.append(record)
+    }
+
+    /// Ensures that the content of the log are flushed upto the given LSN.
+    fn flush(&mut self, lsn: Lsn) {
+        let last_saved_lsn = {
+            let state = self.inner.read().unwrap();
+            state.last_saved_lsn
+        };
+
+        if lsn > last_saved_lsn {
+            let mut state = self.inner.write().unwrap();
+            state.flush();
+        }
+    }
+
+    fn iterator(&self) -> impl Iterator<Item = Box<[u8]>> {
+        let (fm, block) = {
+            let state = self.inner.read().unwrap();
+            (Arc::clone(&state.fm), state.current_block.clone())
+        };
+
+        LogIterator::new(fm, block)
+    }
+}
+
+struct LogIterator {
+    fm: Arc<FileManager>,
+    block: BlockId,
+    page: Page,
+    current_pos: usize,
+    boundary: usize,
+}
+
+impl LogIterator {
+    fn new(fm: Arc<FileManager>, block: BlockId) -> Self {
+        let page = Page::new(fm.block_size());
+        let mut itr = Self {
+            fm,
+            block: block.clone(),
+            page,
+            current_pos: 0,
+            boundary: 0,
+        };
+        itr.move_to_block(&block);
+        itr
+    }
+
+    fn move_to_block(&mut self, block: &BlockId) {
+        self.fm.read(block, &mut self.page);
+        self.boundary = self.page.get_int(0) as usize;
+        self.current_pos = self.boundary;
+    }
+}
+
+impl Iterator for LogIterator {
+    type Item = Box<[u8]>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_pos < self.fm.block_size() || self.block.number() > 0 {
+            if self.current_pos == self.fm.block_size() {
+                let block = BlockId::new(self.block.filename(), self.block.number() - 1);
+                self.move_to_block(&block);
+                self.block = block;
+            }
+            let record = self.page.get_bytes(self.current_pos);
+            self.current_pos += SIZE_OF_INT + record.len();
+            return Some(record.into());
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
-    use std::env;
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use crate::file::Page;
 
@@ -109,9 +201,8 @@ mod tests {
             p.contents().into()
         }
 
-        fn get_flushed_records(&self) -> Vec<&[u8]> {
-            // could return the itr instead from here
-            todo!()
+        fn get_flushed_records(&self) -> Vec<Box<[u8]>> {
+            self.iterator().collect()
         }
     }
 
@@ -119,14 +210,36 @@ mod tests {
     fn test_log_manager() {
         let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME"));
         let fm = FileManager::new(&dir_path, 400);
-        let mut lm = LogManager::new(fm, "logtest");
+        let fname = format!(
+            "logtest_{}.tmp",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let mut lm = LogManager::new(Arc::new(fm), &fname);
 
         lm.create_records(1, 35);
-        assert_eq!(lm.get_flushed_records().len(), 20);
-        // todo: verify contents and reverse order
+
+        let records = lm.get_flushed_records();
+        assert_eq!(records.len(), 20);
 
         lm.create_records(36, 70);
-        lm.flush_till(65);
-        assert_eq!(lm.get_flushed_records().len(), 70);
+        lm.flush(65);
+
+        let records = lm.get_flushed_records();
+        assert_eq!(records.len(), 70);
+
+        let expected: Vec<String> = (1..=70).rev().map(|i| format!("record{}", i)).collect();
+
+        for (idx, (rec, exp)) in records.iter().zip(expected.iter()).enumerate() {
+            let p: Page = rec.clone().into();
+            let actual = p.get_string(0);
+            assert_eq!(
+                actual, *exp,
+                "Mismatch at record {}: expected {}, got {}",
+                idx, exp, actual
+            );
+        }
     }
 }
