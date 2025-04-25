@@ -14,18 +14,21 @@ use std::{
 
 use crate::constants::SIZE_OF_INT;
 
+/// (filename, block number)
 #[derive(Clone, PartialEq, Hash)]
-pub struct BlockId {
-    filename: String,
-    block_num: usize,
-}
+pub struct BlockId(String, usize);
 
 impl BlockId {
     pub fn new(filename: &str, block_num: usize) -> Self {
-        BlockId {
-            filename: filename.to_owned(),
-            block_num,
-        }
+        BlockId(filename.to_owned(), block_num)
+    }
+
+    pub fn number(&self) -> usize {
+        self.1
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.0
     }
 
     fn hash_code(&self) -> u64 {
@@ -37,7 +40,7 @@ impl BlockId {
 
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[file {} block {}]", self.filename, self.block_num)
+        write!(f, "[file {} block {}]", &self.0, self.1)
     }
 }
 
@@ -141,9 +144,9 @@ impl FileManager {
     }
 
     pub fn read(&self, block: &BlockId, p: &mut Page) {
-        let f_ptr = self.get_file(&block.filename);
+        let f_ptr = self.get_file(block.filename());
         let f = f_ptr.lock().unwrap();
-        let offset = block.block_num * self.block_size;
+        let offset = block.number() * self.block_size;
 
         f.read_exact_at(&mut p.byte_buf, offset as u64)
             .expect("failed to read page from file");
@@ -151,9 +154,9 @@ impl FileManager {
     }
 
     pub fn write(&self, block: &BlockId, p: &mut Page) {
-        let f_ptr = self.get_file(&block.filename);
+        let f_ptr = self.get_file(block.filename());
         let f = f_ptr.lock().unwrap();
-        let offset = block.block_num * self.block_size;
+        let offset = block.number() * self.block_size;
 
         f.write_all_at(&p.byte_buf, offset as u64)
             .expect("failed to write page to file");
@@ -167,7 +170,7 @@ impl FileManager {
 
         let f_ptr = self.get_file(filename);
         let f = f_ptr.lock().unwrap();
-        let offset = block.block_num * self.block_size;
+        let offset = block.number() * self.block_size;
 
         f.write_all_at(&bytes, offset as u64)
             .expect("failed to append to file");
@@ -253,7 +256,7 @@ mod tests {
         assert_eq!(fm.length(&fname), 3); // page was added at start offset of block 2; (0, 1, 2) => 3 blocks so far
 
         let appended_block = fm.append(&fname);
-        assert_eq!(appended_block.block_num, 3);
+        assert_eq!(appended_block.number(), 3);
         assert_eq!(fm.length(&fname), 4);
     }
 }
