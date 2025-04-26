@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Log Sequence Number
-type Lsn = u32;
+pub type Lsn = u32;
 
 struct LogManagerInner {
     fm: Arc<FileManager>,
@@ -87,24 +87,24 @@ impl LogManagerInner {
     }
 }
 
-struct LogManager {
+pub struct LogManager {
     inner: RwLock<LogManagerInner>,
 }
 
 impl LogManager {
-    fn new(fm: Arc<FileManager>, logfile: &str) -> Self {
+    pub fn new(fm: Arc<FileManager>, logfile: &str) -> Self {
         Self {
             inner: RwLock::new(LogManagerInner::new(fm, logfile)),
         }
     }
 
-    fn append(&mut self, record: Box<[u8]>) -> Lsn {
+    fn append(&self, record: Box<[u8]>) -> Lsn {
         let mut state = self.inner.write().unwrap();
         state.append(record)
     }
 
-    /// Ensures that the content of the log are flushed upto the given LSN.
-    fn flush(&mut self, lsn: Lsn) {
+    /// Ensures that the content of the log are flushed at least till `lsn`.
+    pub fn flush(&self, lsn: Lsn) {
         let last_saved_lsn = {
             let state = self.inner.read().unwrap();
             state.last_saved_lsn
@@ -116,6 +116,7 @@ impl LogManager {
         }
     }
 
+    /// Starts at the first (latest) record in the last block and iterates from the latest -> oldest record.
     fn iterator(&self) -> impl Iterator<Item = Box<[u8]>> {
         let (fm, block) = {
             let state = self.inner.read().unwrap();
@@ -206,18 +207,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_log_manager() {
-        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME"));
-        let fm = FileManager::new(&dir_path, 400);
-        let fname = format!(
-            "logtest_{}.tmp",
+    fn setup(block_size: usize) -> LogManager {
+        let dirname = format!(
+            "logtest_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
         );
-        let mut lm = LogManager::new(Arc::new(fm), &fname);
+        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
+        let fm = Arc::new(FileManager::new(&dir_path, block_size));
+        LogManager::new(fm, "db.log")
+    }
+
+    #[test]
+    fn test_log_manager() {
+        let mut lm = setup(400);
 
         lm.create_records(1, 35);
 
@@ -237,7 +242,7 @@ mod tests {
             let actual = p.get_string(0);
             assert_eq!(
                 actual, *exp,
-                "Mismatch at record {}: expected {}, got {}",
+                "mismatch at record {}: expected {}, got {}",
                 idx, exp, actual
             );
         }

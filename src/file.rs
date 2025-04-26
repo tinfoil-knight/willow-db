@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -221,19 +223,24 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_file_manager() {
-        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME"));
-        let fm = FileManager::new(&dir_path, 400);
-        let fname = format!(
-            "testfile_{}.tmp",
+    fn setup(block_size: usize) -> FileManager {
+        let dirname = format!(
+            "filetest_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis()
         );
+        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
+        FileManager::new(&dir_path, block_size)
+    }
 
-        let block = BlockId::new(&fname, 2);
+    #[test]
+    fn test_file_manager() {
+        let fm = setup(400);
+        let fname = "testfile";
+
+        let block = BlockId::new(fname, 2);
         let mut p1 = Page::new(fm.block_size());
 
         let pos1 = 88;
@@ -253,10 +260,10 @@ mod tests {
         assert_eq!(p2.get_int(pos2), test_int);
         assert_eq!(p2.get_string(pos1), test_str);
 
-        assert_eq!(fm.length(&fname), 3); // page was added at start offset of block 2; (0, 1, 2) => 3 blocks so far
+        assert_eq!(fm.length(fname), 3); // page was added at start offset of block 2; (0, 1, 2) => 3 blocks so far
 
-        let appended_block = fm.append(&fname);
+        let appended_block = fm.append(fname);
         assert_eq!(appended_block.number(), 3);
-        assert_eq!(fm.length(&fname), 4);
+        assert_eq!(fm.length(fname), 4);
     }
 }
