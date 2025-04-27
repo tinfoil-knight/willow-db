@@ -17,7 +17,7 @@ use std::{
 use crate::constants::SIZE_OF_INT;
 
 /// (filename, block number)
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash, Eq)]
 pub struct BlockId(String, usize);
 
 impl BlockId {
