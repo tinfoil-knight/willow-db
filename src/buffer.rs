@@ -15,6 +15,7 @@ struct Buffer {
     lm: Arc<LogManager>,
     contents: Page,
     block: Option<BlockId>,
+    position: Option<BufferId>,
     pins: usize,
     /// Used to check if the page is modified. Some(T) indicates modified.
     txn_num: Option<usize>,
@@ -29,6 +30,7 @@ impl Buffer {
             lm,
             contents,
             block: None,
+            position: None,
             pins: 0,
             txn_num: None,
             lsn: None,
@@ -59,11 +61,12 @@ impl Buffer {
         }
     }
 
-    fn assign_to_block(&mut self, block: &BlockId) {
+    fn assign_to_block(&mut self, block: &BlockId, pos: usize) {
         self.flush();
         self.block = Some(block.clone());
         self.fm.read(block, &mut self.contents);
         self.pins = 0;
+        self.position = Some(pos);
     }
 
     fn flush(&mut self) {
@@ -113,6 +116,7 @@ impl BufferManagerInner {
         let lock = self.pool.get(pos)?;
         let mut buf = lock.write().unwrap();
         buf.assign_to_block(block);
+        buf.assign_to_block(block, pos);
         buf.pin();
 
         if existing.is_none() {
@@ -125,8 +129,8 @@ impl BufferManagerInner {
     fn unpin(&mut self, mut buf: RwLockWriteGuard<Buffer>) {
         buf.unpin();
         if !buf.is_pinned() {
-            let idx = self.buf_table.get(buf.block.as_ref().unwrap()).unwrap();
-            self.free_list.push(*idx);
+            let idx = buf.position.unwrap();
+            self.free_list.push(idx);
         }
     }
 
@@ -135,13 +139,13 @@ impl BufferManagerInner {
     }
 
     fn flush_all(&self, txn_num: usize) {
-        for &buffer_id in self.buf_table.values() {
+        for &pos in self.buf_table.values() {
             let matches = {
-                let buf = self.pool.get(buffer_id).unwrap().read().unwrap();
+                let buf = self.pool.get(pos).unwrap().read().unwrap();
                 buf.modifying_txn().is_some_and(|x| x == txn_num)
             };
             if matches {
-                let mut buf = self.pool.get(buffer_id).unwrap().write().unwrap();
+                let mut buf = self.pool.get(pos).unwrap().write().unwrap();
                 buf.flush();
             }
         }
