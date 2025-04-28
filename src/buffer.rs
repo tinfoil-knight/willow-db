@@ -115,7 +115,10 @@ impl BufferManagerInner {
 
         let lock = self.pool.get(pos)?;
         let mut buf = lock.write().unwrap();
-        buf.assign_to_block(block);
+        if existing.is_none() && buf.block().is_some() {
+            self.buf_table.remove(buf.block().unwrap());
+        }
+
         buf.assign_to_block(block, pos);
         buf.pin();
 
@@ -129,6 +132,7 @@ impl BufferManagerInner {
     fn unpin(&mut self, mut buf: RwLockWriteGuard<Buffer>) {
         buf.unpin();
         if !buf.is_pinned() {
+            self.buf_table.remove(buf.block().unwrap());
             let idx = buf.position.unwrap();
             self.free_list.push(idx);
         }
@@ -163,9 +167,9 @@ impl BufferManager {
         }
     }
 
-    fn pin(&self, block: &BlockId) -> Result<Arc<RwLock<Buffer>>, &str> {
+    fn pin(&self, block: &BlockId) -> Option<Arc<RwLock<Buffer>>> {
         let mut state = self.state.write().unwrap();
-        state.pin(block).ok_or("buffer abort")
+        state.pin(block)
     }
 
     fn unpin(&self, buf: RwLockWriteGuard<Buffer>) {
@@ -246,5 +250,43 @@ mod tests {
         p2.set_int(80, 9999);
         buf2.set_modified(1, Some(0));
         bm.unpin(buf2);
+    }
+
+    #[test]
+    fn test_buffer_manager() {
+        let bm = setup("buffermgrtest", 400, 3);
+        let fname = "testfile";
+
+        let mut bufv = Vec::new();
+        bufv.resize_with(6, || None);
+
+        let (blk_id0, blk_id1, blk_id2, blk_id3) = (
+            BlockId::new(fname, 0),
+            BlockId::new(fname, 1),
+            BlockId::new(fname, 2),
+            BlockId::new(fname, 3),
+        );
+
+        bufv[0] = bm.pin(&blk_id0);
+        bufv[1] = bm.pin(&blk_id1);
+        bufv[2] = bm.pin(&blk_id2);
+
+        bm.unpin(bufv[1].as_mut().unwrap().write().unwrap());
+        bufv[1] = None;
+
+        bufv[3] = bm.pin(&blk_id0);
+        bufv[4] = bm.pin(&blk_id1);
+
+        assert_eq!(bm.available(), 0);
+        bufv[5] = bm.pin(&blk_id3);
+        assert!(bufv[5].is_none());
+
+        bm.unpin(bufv[2].as_mut().unwrap().write().unwrap());
+        bufv[2] = None;
+
+        bufv[5] = bm.pin(&blk_id3);
+        assert!(bufv[5].is_some());
+
+        // todo: verify final buffer alloc
     }
 }
