@@ -17,7 +17,7 @@ use std::{
 use crate::constants::SIZE_OF_INT;
 
 /// (filename, block number)
-#[derive(Clone, PartialEq, Hash, Eq)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct BlockId(String, usize);
 
 impl BlockId {
@@ -150,7 +150,7 @@ impl FileManager {
         let f = f_ptr.lock().unwrap();
         let offset = block.number() * self.block_size;
 
-        f.read_exact_at(&mut p.byte_buf, offset as u64)
+        f.read_at(&mut p.byte_buf, offset as u64)
             .expect("failed to read page from file");
         self.stats.blocks_read.fetch_add(1, Ordering::SeqCst);
     }
@@ -195,6 +195,10 @@ impl FileManager {
             return Arc::clone(f);
         }
         let mut map = self.open_files.write().unwrap();
+        // another thread could have inserted it meanwhile
+        if let Some(f) = map.get(filename) {
+            return Arc::clone(f);
+        }
 
         let table_path = self.db_directory.join(filename);
         let table = OpenOptions::new()

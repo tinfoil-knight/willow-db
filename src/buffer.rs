@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockWriteGuard},
 };
 
 use crate::{
@@ -61,6 +61,7 @@ impl Buffer {
 
     fn assign_to_block(&mut self, block: &BlockId) {
         self.flush();
+        self.block = Some(block.clone());
         self.fm.read(block, &mut self.contents);
         self.pins = 0;
     }
@@ -121,13 +122,11 @@ impl BufferManagerInner {
         Some(Arc::clone(lock))
     }
 
-    fn unpin(&mut self, block: &BlockId) {
-        if let Some(&idx) = self.buf_table.get(block) {
-            let mut buf = self.pool.get(idx).unwrap().write().unwrap();
-            buf.unpin();
-            if !buf.is_pinned() {
-                self.free_list.push(idx);
-            }
+    fn unpin(&mut self, mut buf: RwLockWriteGuard<Buffer>) {
+        buf.unpin();
+        if !buf.is_pinned() {
+            let idx = self.buf_table.get(buf.block.as_ref().unwrap()).unwrap();
+            self.free_list.push(*idx);
         }
     }
 
@@ -165,9 +164,9 @@ impl BufferManager {
         state.pin(block).ok_or("buffer abort")
     }
 
-    fn unpin(&self, block: &BlockId) {
+    fn unpin(&self, buf: RwLockWriteGuard<Buffer>) {
         let mut state = self.state.write().unwrap();
-        state.unpin(block);
+        state.unpin(buf);
     }
 
     fn available(&self) -> usize {
@@ -178,5 +177,70 @@ impl BufferManager {
     fn flush_all(&self, txn_num: usize) {
         let state = self.state.read().unwrap();
         state.flush_all(txn_num);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    fn setup(prefix: &str, block_size: usize, capacity: usize) -> BufferManager {
+        let dirname = format!(
+            "{}_{}",
+            prefix,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
+        let fm = Arc::new(FileManager::new(&dir_path, block_size));
+        let lm = Arc::new(LogManager::new(Arc::clone(&fm), "db.log"));
+        BufferManager::new(fm, lm, capacity)
+    }
+
+    #[test]
+    fn test_buffer() {
+        let bm = setup("buffertest", 400, 3);
+        let fname = "testfile";
+
+        let buf1_lock = bm.pin(&BlockId::new(fname, 1)).unwrap();
+        let mut buf1 = buf1_lock.write().unwrap();
+
+        let p = buf1.contents();
+        let n = p.get_int(80);
+
+        // this modification will get written to disk
+        p.set_int(80, n + 1);
+        buf1.set_modified(1, Some(0));
+
+        bm.unpin(buf1);
+
+        let b2 = BlockId::new(fname, 2);
+
+        // one of these pins will flush buf1 to disk
+
+        let buf2_lock = bm.pin(&b2).unwrap();
+        let buf2 = buf2_lock.write().unwrap();
+
+        bm.pin(&BlockId::new(fname, 3)).unwrap();
+        bm.pin(&BlockId::new(fname, 4)).unwrap();
+
+        bm.unpin(buf2);
+
+        let buf2_lock = bm.pin(&b2).unwrap();
+        let mut buf2 = buf2_lock.write().unwrap();
+
+        let p2 = buf2.contents();
+        // this modification won't get written to disk
+        p2.set_int(80, 9999);
+        buf2.set_modified(1, Some(0));
+        bm.unpin(buf2);
     }
 }
