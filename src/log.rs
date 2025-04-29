@@ -119,7 +119,8 @@ impl LogManager {
     /// Starts at the first (latest) record in the last block and iterates from the latest -> oldest record.
     fn iterator(&self) -> impl Iterator<Item = Box<[u8]>> {
         let (fm, block) = {
-            let state = self.inner.read().unwrap();
+            let mut state = self.inner.write().unwrap();
+            state.flush();
             (Arc::clone(&state.fm), state.current_block.clone())
         };
 
