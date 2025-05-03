@@ -204,7 +204,12 @@ mod tests {
         }
 
         fn get_flushed_records(&self) -> Vec<Box<[u8]>> {
-            self.iterator().collect()
+            let (fm, block) = {
+                let state = self.inner.read().unwrap();
+                (Arc::clone(&state.fm), state.current_block.clone())
+            };
+
+            LogIterator::new(fm, block).collect()
         }
     }
 
