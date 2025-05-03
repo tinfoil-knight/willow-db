@@ -10,6 +10,8 @@ use crate::{
     log::{LogManager, Lsn},
 };
 
+use super::replacer::{EvictionPolicy, Replacer};
+
 struct Buffer {
     fm: Arc<FileManager>,
     lm: Arc<LogManager>,
@@ -17,8 +19,11 @@ struct Buffer {
     block: Option<BlockId>,
     position: Option<BufferId>,
     pins: usize,
-    /// Used to check if the page is modified. Some(T) indicates modified.
+    /// Some(t) indicates that the page is modified &
+    /// t is the txn that made the change.
     txn_num: Option<usize>,
+    /// If page is modified then this holds the LSN of the most recent log record.
+    /// None indicates that no log record was generated for the update.
     lsn: Option<Lsn>,
 }
 
@@ -92,10 +97,16 @@ struct BufferManagerInner {
     buf_table: HashMap<BlockId, BufferId>,
     free_list: Vec<BufferId>,
     pool: Box<[Arc<RwLock<Buffer>>]>,
+    replacer: Box<dyn Replacer>,
 }
 
 impl BufferManagerInner {
-    fn new(fm: Arc<FileManager>, lm: Arc<LogManager>, capacity: usize) -> Self {
+    fn new(
+        fm: Arc<FileManager>,
+        lm: Arc<LogManager>,
+        capacity: usize,
+        eviction_policy: EvictionPolicy,
+    ) -> Self {
         let mut v = Vec::new();
         v.resize_with(capacity, || {
             Arc::new(RwLock::new(Buffer::new(Arc::clone(&fm), Arc::clone(&lm))))
@@ -103,15 +114,18 @@ impl BufferManagerInner {
 
         Self {
             buf_table: HashMap::new(),
-            pool: v.into_boxed_slice(),
             free_list: (0..capacity).collect(),
+            pool: v.into_boxed_slice(),
+            replacer: eviction_policy.into(),
         }
     }
 
     fn pin(&mut self, block: &BlockId) -> Option<Arc<RwLock<Buffer>>> {
-        // find existing buffer or choose an unpinned buffer
+        // find existing buffer or choose an un-pinned buffer
         let existing = self.buf_table.get(block).copied();
-        let pos = existing.or_else(|| self.free_list.pop())?;
+        let pos = existing
+            .or_else(|| self.free_list.pop())
+            .or_else(|| self.replacer.evict())?;
 
         let lock = self.pool.get(pos)?;
         let mut buf = lock.write().unwrap();
@@ -121,6 +135,7 @@ impl BufferManagerInner {
 
         buf.assign_to_block(block, pos);
         buf.pin();
+        self.replacer.record_access(pos);
 
         if existing.is_none() {
             self.buf_table.insert(block.clone(), pos);
@@ -134,12 +149,12 @@ impl BufferManagerInner {
         if !buf.is_pinned() {
             self.buf_table.remove(buf.block().unwrap());
             let idx = buf.position.unwrap();
-            self.free_list.push(idx);
+            self.replacer.set_evictable(idx, true);
         }
     }
 
     fn available(&self) -> usize {
-        self.free_list.len()
+        self.free_list.len() + self.replacer.available()
     }
 
     fn flush_all(&self, txn_num: usize) {
@@ -161,9 +176,14 @@ pub struct BufferManager {
 }
 
 impl BufferManager {
-    pub fn new(fm: Arc<FileManager>, lm: Arc<LogManager>, capacity: usize) -> Self {
+    pub fn new(
+        fm: Arc<FileManager>,
+        lm: Arc<LogManager>,
+        capacity: usize,
+        eviction_policy: EvictionPolicy,
+    ) -> Self {
         Self {
-            state: RwLock::new(BufferManagerInner::new(fm, lm, capacity)),
+            state: RwLock::new(BufferManagerInner::new(fm, lm, capacity, eviction_policy)),
         }
     }
 
@@ -210,7 +230,7 @@ mod tests {
         let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
         let fm = Arc::new(FileManager::new(&dir_path, block_size));
         let lm = Arc::new(LogManager::new(Arc::clone(&fm), "db.log"));
-        BufferManager::new(fm, lm, capacity)
+        BufferManager::new(fm, lm, capacity, EvictionPolicy::default())
     }
 
     #[test]
@@ -225,6 +245,7 @@ mod tests {
         let n = p.get_int(80);
 
         // this modification will get written to disk
+        // todo: verify this
         p.set_int(80, n + 1);
         buf1.set_modified(1, Some(0));
 
@@ -247,6 +268,7 @@ mod tests {
 
         let p2 = buf2.contents();
         // this modification won't get written to disk
+        // todo: verify this
         p2.set_int(80, 9999);
         buf2.set_modified(1, Some(0));
         bm.unpin(buf2);
@@ -286,7 +308,5 @@ mod tests {
 
         bufv[5] = bm.pin(&blk_id3);
         assert!(bufv[5].is_some());
-
-        // todo: verify final buffer alloc
     }
 }
