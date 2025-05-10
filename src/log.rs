@@ -26,7 +26,7 @@ impl LogManagerInner {
         let current_block = if logsize == 0 {
             let block = fm.append(logfile);
             logpage.set_int(0, fm.block_size() as i32);
-            fm.write(&block, &mut logpage);
+            fm.write(&block, &logpage);
             block
         } else {
             let block = BlockId::new(logfile, logsize as usize - 1);
@@ -77,12 +77,12 @@ impl LogManagerInner {
     fn append_new_block(&mut self) -> BlockId {
         let block = self.fm.append(&self.logfile);
         self.logpage.set_int(0, self.fm.block_size() as i32);
-        self.fm.write(&block, &mut self.logpage);
+        self.fm.write(&block, &self.logpage);
         block
     }
 
     fn flush(&mut self) {
-        self.fm.write(&self.current_block, &mut self.logpage);
+        self.fm.write(&self.current_block, &self.logpage);
         self.last_saved_lsn = self.latest_lsn;
     }
 }

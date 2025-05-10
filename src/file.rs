@@ -155,7 +155,7 @@ impl FileManager {
         self.stats.blocks_read.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn write(&self, block: &BlockId, p: &mut Page) {
+    pub fn write(&self, block: &BlockId, p: &Page) {
         let f_ptr = self.get_file(block.filename());
         let f = f_ptr.lock().unwrap();
         let offset = block.number() * self.block_size;
@@ -256,7 +256,7 @@ mod tests {
         let test_int = 345;
         p1.set_int(pos2, test_int);
 
-        fm.write(&block, &mut p1);
+        fm.write(&block, &p1);
 
         let mut p2 = Page::new(fm.block_size());
         fm.read(&block, &mut p2);
