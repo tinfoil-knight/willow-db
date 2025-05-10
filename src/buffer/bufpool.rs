@@ -19,7 +19,7 @@ struct Buffer {
     block: Option<BlockId>,
     position: Option<BufferId>,
     pins: usize,
-    /// Some(t) indicates that the page is modified &
+    /// Some(t) indicates that the page is modified where
     /// t is the txn that made the change.
     txn_num: Option<usize>,
     /// If page is modified then this holds the LSN of the most recent log record.
@@ -77,6 +77,7 @@ impl Buffer {
     fn flush(&mut self) {
         if self.txn_num.is_some() {
             self.lm.flush(self.lsn.unwrap());
+            self.fm.write(self.block().unwrap(), &self.contents);
             self.txn_num = None
         }
     }
@@ -199,7 +200,7 @@ impl BufferManager {
 
     fn available(&self) -> usize {
         let state = self.state.read().unwrap();
-        state.free_list.len()
+        state.free_list.len() + state.replacer.available()
     }
 
     fn flush_all(&self, txn_num: usize) {
@@ -218,7 +219,11 @@ mod tests {
 
     use super::*;
 
-    fn setup(prefix: &str, block_size: usize, capacity: usize) -> BufferManager {
+    fn setup(
+        prefix: &str,
+        block_size: usize,
+        capacity: usize,
+    ) -> (Arc<FileManager>, BufferManager) {
         let dirname = format!(
             "{}_{}",
             prefix,
@@ -230,53 +235,70 @@ mod tests {
         let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
         let fm = Arc::new(FileManager::new(&dir_path, block_size));
         let lm = Arc::new(LogManager::new(Arc::clone(&fm), "db.log"));
-        BufferManager::new(fm, lm, capacity, EvictionPolicy::default())
+        (
+            Arc::clone(&fm),
+            BufferManager::new(fm, lm, capacity, EvictionPolicy::default()),
+        )
     }
 
     #[test]
     fn test_buffer() {
-        let bm = setup("buffertest", 400, 3);
+        let (fm, bm) = setup("buffertest", 400, 3);
         let fname = "testfile";
+
+        assert_eq!(bm.available(), 3);
 
         let buf1_lock = bm.pin(&BlockId::new(fname, 1)).unwrap();
         let mut buf1 = buf1_lock.write().unwrap();
-
         let p = buf1.contents();
+
         let n = p.get_int(80);
+        assert_eq!(n, 0);
 
         // this modification will get written to disk
-        // todo: verify this
         p.set_int(80, n + 1);
         buf1.set_modified(1, Some(0));
-
         bm.unpin(buf1);
 
-        let b2 = BlockId::new(fname, 2);
+        assert_eq!(bm.available(), 3);
 
-        // one of these pins will flush buf1 to disk
-
-        let buf2_lock = bm.pin(&b2).unwrap();
+        let buf2_lock = bm.pin(&BlockId::new(fname, 2)).unwrap();
         let buf2 = buf2_lock.write().unwrap();
 
         bm.pin(&BlockId::new(fname, 3)).unwrap();
         bm.pin(&BlockId::new(fname, 4)).unwrap();
 
+        // ^one of these pins should've flushed block1 to disk
         bm.unpin(buf2);
+        assert_eq!(bm.available(), 1);
 
-        let buf2_lock = bm.pin(&b2).unwrap();
+        // verify that block1 was written to disk
+
+        let mut p1 = Page::new(fm.block_size());
+        fm.read(&BlockId::new(fname, 1), &mut p1);
+
+        assert_eq!(p1.get_int(80), 1);
+
+        let buf2_lock = bm.pin(&BlockId::new(fname, 2)).unwrap();
         let mut buf2 = buf2_lock.write().unwrap();
-
         let p2 = buf2.contents();
+
         // this modification won't get written to disk
-        // todo: verify this
         p2.set_int(80, 9999);
         buf2.set_modified(1, Some(0));
         bm.unpin(buf2);
+
+        // verify that block2 wasn't written to disk
+
+        let mut p2 = Page::new(fm.block_size());
+        fm.read(&BlockId::new(fname, 2), &mut p2);
+
+        assert_eq!(p2.get_int(80), 0);
     }
 
     #[test]
     fn test_buffer_manager() {
-        let bm = setup("buffermgrtest", 400, 3);
+        let (_fm, bm) = setup("buffermgrtest", 400, 3);
         let fname = "testfile";
 
         let mut bufv = Vec::new();
