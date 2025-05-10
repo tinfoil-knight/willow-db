@@ -31,7 +31,9 @@ struct Fifo {
 
 impl Replacer for Fifo {
     fn record_access(&mut self, key: usize) {
-        self.store.insert(key, false);
+        if let Some(true) = self.store.insert(key, false) {
+            self.available -= 1
+        }
     }
 
     fn evict(&mut self) -> Option<usize> {
@@ -53,6 +55,8 @@ impl Replacer for Fifo {
         self.store.entry(key).and_modify(|e| {
             if is_evictable && !*e {
                 self.available += 1;
+            } else if !is_evictable && *e {
+                self.available -= 1;
             }
             *e = is_evictable
         });
@@ -113,6 +117,9 @@ impl Replacer for LruK {
     fn record_access(&mut self, key: usize) {
         self.current_ts += 1;
         let entry = self.store.entry(key).or_default();
+        if entry.is_evictable {
+            self.available -= 1;
+        }
         entry.is_evictable = false;
         entry.history.push_back(self.current_ts);
         if entry.history.len() > self.k {
@@ -141,6 +148,7 @@ impl Replacer for LruK {
         }
 
         if let Some(k) = key {
+            self.available -= 1;
             self.store.remove(&k);
         }
 
@@ -151,6 +159,8 @@ impl Replacer for LruK {
         self.store.entry(key).and_modify(|e| {
             if is_evictable && !e.is_evictable {
                 self.available += 1;
+            } else if !is_evictable && e.is_evictable {
+                self.available -= 1;
             }
             e.is_evictable = is_evictable
         });
@@ -158,5 +168,104 @@ impl Replacer for LruK {
 
     fn available(&self) -> usize {
         self.available
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fifo() {
+        // eviction order
+
+        let mut fifo = Fifo::default();
+
+        fifo.record_access(1);
+        fifo.record_access(2);
+        fifo.record_access(3);
+
+        fifo.set_evictable(1, true);
+        fifo.set_evictable(2, true);
+        fifo.set_evictable(3, true);
+
+        assert_eq!(fifo.available(), 3);
+        assert_eq!(fifo.evict(), Some(1));
+        assert_eq!(fifo.available(), 2);
+        assert_eq!(fifo.evict(), Some(2));
+        assert_eq!(fifo.evict(), Some(3));
+        assert_eq!(fifo.evict(), None);
+        assert_eq!(fifo.available(), 0);
+
+        // set_evictable_behavior
+
+        let mut fifo = Fifo::default();
+
+        fifo.record_access(10);
+        assert_eq!(fifo.available(), 0);
+        fifo.set_evictable(10, true);
+        assert_eq!(fifo.available(), 1);
+        fifo.set_evictable(10, false);
+        assert_eq!(fifo.available(), 0);
+    }
+
+    #[test]
+    fn test_lruk_eviction() {
+        // eviction order
+
+        let mut lruk = LruK::default();
+
+        lruk.record_access(1); // ts=1
+        lruk.record_access(2); // ts=2
+        lruk.record_access(1); // ts=3 -> 1 has [1,3]
+        lruk.record_access(3); // ts=4
+        lruk.set_evictable(1, true);
+        lruk.set_evictable(2, true);
+        lruk.set_evictable(3, true);
+
+        assert_eq!(lruk.available(), 3);
+
+        // 2 and 3 have only one access => inf dist; 2 was added before 3
+        assert_eq!(lruk.evict(), Some(2));
+        assert_eq!(lruk.available(), 2);
+
+        // Now 1 (dist = ts - 1 = 4 - 1 = 3) vs 3 (dist = inf)
+        assert_eq!(lruk.evict(), Some(3));
+        assert_eq!(lruk.evict(), Some(1));
+        assert_eq!(lruk.evict(), None);
+        assert_eq!(lruk.available(), 0);
+
+        // tie breaker in distance resolution
+
+        let mut lruk = LruK::default();
+
+        lruk.record_access(100); // ts=1
+        lruk.record_access(200); // ts=2
+        lruk.record_access(100); // ts=3 -> 100 has [1,3]
+        lruk.record_access(200); // ts=4 -> 200 has [2,4]
+
+        lruk.set_evictable(100, true);
+        lruk.set_evictable(200, true);
+
+        // Both have same dist = ts - oldest = 4 - 1 and 4 - 2 = 3 and 2
+        // So 100 will have higher dist
+        assert_eq!(lruk.evict(), Some(100));
+        assert_eq!(lruk.evict(), Some(200));
+
+        // set_evictable only increases once
+
+        let mut lruk = LruK::default();
+
+        lruk.record_access(9); // ts=1
+        lruk.set_evictable(9, true);
+        assert_eq!(lruk.available(), 1);
+
+        lruk.set_evictable(9, true); // should not increase again
+        assert_eq!(lruk.available(), 1);
+
+        lruk.set_evictable(9, false);
+        assert_eq!(lruk.available(), 0);
+        lruk.set_evictable(9, true); // should increase again
+        assert_eq!(lruk.available(), 1);
     }
 }
