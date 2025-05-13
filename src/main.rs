@@ -8,6 +8,7 @@ mod buffer;
 mod constants;
 mod file;
 mod log;
+mod txn;
 
 fn main() {
     let fm = Arc::new(FileManager::new(Path::new("testdb"), 1000));
