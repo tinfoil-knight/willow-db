@@ -6,7 +6,7 @@ use crate::{
     buffer::BufferManager,
     constants::SIZE_OF_INT,
     file::{BlockId, Page},
-    log::LogManager,
+    log::{LogManager, Lsn},
 };
 
 struct RecoveryManager {
@@ -22,7 +22,6 @@ impl RecoveryManager {
     fn recover() {}
 }
 
-#[repr(u8)]
 enum RecordType {
     Checkpoint = 0,
     Start = 1,
@@ -31,10 +30,10 @@ enum RecordType {
     Update = 4,
 }
 
-impl TryFrom<u8> for RecordType {
+impl TryFrom<i32> for RecordType {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Checkpoint),
             1 => Ok(Self::Start),
@@ -48,8 +47,17 @@ impl TryFrom<u8> for RecordType {
 
 #[allow(clippy::upper_case_acronyms)]
 enum UpdateValue {
-    STRING(String),
     INT(i32),
+    STRING(String),
+}
+
+impl UpdateValue {
+    fn size(&self) -> usize {
+        match &self {
+            UpdateValue::INT(_) => SIZE_OF_INT,
+            UpdateValue::STRING(s) => Page::str_size(s),
+        }
+    }
 }
 
 impl fmt::Display for UpdateValue {
@@ -103,7 +111,7 @@ impl LogRecord {
     fn new(bytes: Box<[u8]>) -> Option<Self> {
         let p: Page = bytes.into();
 
-        if let Ok(record_type) = RecordType::try_from(p.get_int(0) as u8) {
+        if let Ok(record_type) = RecordType::try_from(p.get_int(0)) {
             match record_type {
                 RecordType::Checkpoint => Some(Self::Checkpoint {}),
                 RecordType::Start => Some(Self::Commit {
@@ -157,7 +165,57 @@ impl LogRecord {
         }
     }
 
-    fn write_to_log(&self, lm: Arc<LogManager>) -> usize {
-        todo!()
+    fn write_to_log(&self, lm: Arc<LogManager>) -> Lsn {
+        let op = self.operation();
+
+        match &self {
+            LogRecord::Checkpoint {} => {
+                let mut p = Page::new(SIZE_OF_INT);
+                p.set_int(0, op as i32);
+                lm.append(p.contents())
+            }
+            LogRecord::Start { txn_num }
+            | LogRecord::Commit { txn_num }
+            | LogRecord::Rollback { txn_num } => {
+                let mut p = Page::new(SIZE_OF_INT * 2);
+                p.set_int(0, op as i32);
+                p.set_int(SIZE_OF_INT, *txn_num as i32);
+                lm.append(p.contents())
+            }
+            LogRecord::Update {
+                value,
+                txn_num,
+                offset,
+                block,
+            } => {
+                // op | txn_num | blk_filename | blk_number | offset | prev int value at offset
+
+                let tpos = SIZE_OF_INT;
+                let fpos = tpos + SIZE_OF_INT;
+                let bpos = fpos + Page::str_size(block.filename());
+                let opos = bpos + SIZE_OF_INT;
+                let vpos = opos + SIZE_OF_INT;
+
+                let val_size = value.size();
+
+                let mut p = Page::new(vpos + val_size);
+                p.set_int(0, op as i32);
+                p.set_int(tpos, *txn_num as i32);
+                p.set_string(fpos, block.filename());
+                p.set_int(bpos, block.number() as i32);
+                p.set_int(opos, *offset as i32);
+
+                match value {
+                    UpdateValue::INT(n) => {
+                        p.set_int(vpos, *n);
+                    }
+                    UpdateValue::STRING(s) => {
+                        p.set_string(vpos, s);
+                    }
+                };
+
+                lm.append(p.contents())
+            }
+        }
     }
 }

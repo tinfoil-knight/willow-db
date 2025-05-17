@@ -44,7 +44,7 @@ impl LogManagerInner {
         }
     }
 
-    fn append(&mut self, record: Box<[u8]>) -> Lsn {
+    fn append(&mut self, record: &[u8]) -> Lsn {
         let mut boundary = self.logpage.get_int(0);
         let record_size = record.len();
         let bytes_needed = record_size + SIZE_OF_INT;
@@ -98,7 +98,7 @@ impl LogManager {
         }
     }
 
-    fn append(&self, record: Box<[u8]>) -> Lsn {
+    pub fn append(&self, record: &[u8]) -> Lsn {
         let mut state = self.inner.write().unwrap();
         state.append(record)
     }
@@ -191,7 +191,7 @@ mod tests {
         fn create_records(&mut self, start: i32, end: i32) {
             for i in start..=end {
                 let record = Self::create_log_record(&format!("record{}", i), i + 100);
-                self.append(record);
+                self.append(&record);
             }
         }
 
