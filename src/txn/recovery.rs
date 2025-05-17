@@ -70,7 +70,6 @@ impl RecoveryManager {
             }
         };
         let block = buf.block().unwrap().clone();
-        // todo: verify
         LogRecord::Update {
             value: old_val,
             txn_num: self.txn_num,
@@ -139,12 +138,37 @@ impl TryFrom<i32> for RecordType {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-enum UpdateValue {
+enum UpdateValueType {
+    INT = 0,
+    STRING = 1,
+}
+
+impl TryFrom<i32> for UpdateValueType {
+    type Error = ();
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::INT),
+            1 => Ok(Self::STRING),
+            _ => Err(()),
+        }
+    }
+}
+
+#[allow(clippy::upper_case_acronyms)]
+pub enum UpdateValue {
     INT(i32),
     STRING(String),
 }
 
 impl UpdateValue {
+    fn data_type(&self) -> UpdateValueType {
+        match &self {
+            UpdateValue::INT(_) => UpdateValueType::INT,
+            UpdateValue::STRING(_) => UpdateValueType::STRING,
+        }
+    }
+
     fn size(&self) -> usize {
         match &self {
             UpdateValue::INT(_) => SIZE_OF_INT,
@@ -175,8 +199,8 @@ enum LogRecord {
         txn_num: usize,
     },
     Update {
-        value: UpdateValue,
         txn_num: usize,
+        value: UpdateValue,
         offset: usize,
         block: BlockId,
     },
@@ -205,19 +229,52 @@ impl LogRecord {
         let p: Page = bytes.into();
 
         if let Ok(record_type) = RecordType::try_from(p.get_int(0)) {
-            match record_type {
-                RecordType::Checkpoint => Some(Self::Checkpoint {}),
-                RecordType::Start => Some(Self::Commit {
+            let record = match record_type {
+                RecordType::Checkpoint => Self::Checkpoint {},
+                RecordType::Start => Self::Start {
                     txn_num: p.get_int(SIZE_OF_INT) as usize,
-                }),
-                RecordType::Commit => Some(Self::Commit {
+                },
+                RecordType::Commit => Self::Commit {
                     txn_num: p.get_int(SIZE_OF_INT) as usize,
-                }),
-                RecordType::Rollback => Some(Self::Commit {
+                },
+                RecordType::Rollback => Self::Rollback {
                     txn_num: p.get_int(SIZE_OF_INT) as usize,
-                }),
-                RecordType::Update => todo!(),
-            }
+                },
+                RecordType::Update => {
+                    let tpos = SIZE_OF_INT;
+                    let txn_num = p.get_int(tpos) as usize;
+
+                    let fpos = tpos + SIZE_OF_INT;
+                    let filename = p.get_string(fpos);
+
+                    let bpos = fpos + Page::str_size(&filename);
+                    let block_num = p.get_int(bpos);
+                    let block = BlockId::new(&filename, block_num as usize);
+
+                    let dtpos = bpos + SIZE_OF_INT;
+                    let data_type =
+                        UpdateValueType::try_from(p.get_int(dtpos)).expect("valid data type");
+
+                    let opos = dtpos + SIZE_OF_INT;
+                    let offset = p.get_int(opos) as usize;
+
+                    let vpos = opos + SIZE_OF_INT;
+                    let value = match data_type {
+                        UpdateValueType::INT => UpdateValue::INT(p.get_int(vpos)),
+                        UpdateValueType::STRING => {
+                            UpdateValue::STRING(p.get_string(vpos).into_owned())
+                        }
+                    };
+
+                    Self::Update {
+                        txn_num,
+                        value,
+                        offset,
+                        block,
+                    }
+                }
+            };
+            Some(record)
         } else {
             None
         }
@@ -243,8 +300,7 @@ impl LogRecord {
         }
     }
 
-    fn undo(&self, txn_num: &Arc<Transaction>) {
-        // ? usize or Txn object
+    fn undo(&self, txn: &Arc<Transaction>) {
         match &self {
             LogRecord::Checkpoint {}
             | LogRecord::Start { .. }
@@ -252,10 +308,14 @@ impl LogRecord {
             | LogRecord::Rollback { .. } => {}
             LogRecord::Update {
                 value,
-                txn_num: log_txn,
                 offset,
                 block,
-            } => todo!(),
+                ..
+            } => {
+                txn.pin(block);
+                txn.set_value(block, *offset, value, false);
+                txn.unpin(block);
+            }
         }
     }
 
@@ -277,17 +337,19 @@ impl LogRecord {
                 lm.append(p.contents())
             }
             LogRecord::Update {
-                value,
                 txn_num,
+                value,
                 offset,
                 block,
             } => {
-                // op | txn_num | blk_filename | blk_number | offset | prev int value at offset
+                // Physical Repr:
+                // op | txn_num | blk_filename | blk_number | data type | offset | value
 
                 let tpos = SIZE_OF_INT;
                 let fpos = tpos + SIZE_OF_INT;
                 let bpos = fpos + Page::str_size(block.filename());
-                let opos = bpos + SIZE_OF_INT;
+                let dtpos = bpos + SIZE_OF_INT;
+                let opos = dtpos + SIZE_OF_INT;
                 let vpos = opos + SIZE_OF_INT;
 
                 let val_size = value.size();
@@ -297,6 +359,7 @@ impl LogRecord {
                 p.set_int(tpos, *txn_num as i32);
                 p.set_string(fpos, block.filename());
                 p.set_int(bpos, block.number() as i32);
+                p.set_int(dtpos, value.data_type() as i32);
                 p.set_int(opos, *offset as i32);
 
                 match value {
