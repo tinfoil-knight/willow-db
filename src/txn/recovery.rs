@@ -3,25 +3,118 @@
 use std::{fmt, sync::Arc};
 
 use crate::{
-    buffer::BufferManager,
+    buffer::{Buffer, BufferManager},
     constants::SIZE_OF_INT,
     file::{BlockId, Page},
     log::{LogManager, Lsn},
 };
 
+use super::transaction::Transaction;
+
 struct RecoveryManager {
     lm: Arc<LogManager>,
     bm: Arc<BufferManager>,
+    txn: Arc<Transaction>,
+    txn_num: usize,
 }
 
 impl RecoveryManager {
-    fn commit() {}
+    fn new(
+        txn: Arc<Transaction>,
+        txn_num: usize,
+        lm: Arc<LogManager>,
+        bm: Arc<BufferManager>,
+    ) -> Self {
+        LogRecord::Start { txn_num }.write_to_log(&lm);
+        Self {
+            lm,
+            bm,
+            txn,
+            txn_num,
+        }
+    }
 
-    fn rollback() {}
+    fn commit(&self) {
+        self.bm.flush_all(self.txn_num);
+        let lsn = LogRecord::Commit {
+            txn_num: self.txn_num,
+        }
+        .write_to_log(&self.lm);
+        self.lm.flush(lsn);
+    }
 
-    fn recover() {}
+    fn rollback(&self) {
+        self.do_rollback();
+
+        self.bm.flush_all(self.txn_num);
+        let lsn = LogRecord::Rollback {
+            txn_num: self.txn_num,
+        }
+        .write_to_log(&self.lm);
+        self.lm.flush(lsn);
+    }
+
+    fn recover(&self) {
+        self.do_recover();
+
+        self.bm.flush_all(self.txn_num);
+        let lsn = LogRecord::Checkpoint {}.write_to_log(&self.lm);
+        self.lm.flush(lsn);
+    }
+
+    fn set_update(&self, buf: Buffer, offset: usize, new_val: UpdateValue) -> Lsn {
+        let old_val = match new_val {
+            UpdateValue::INT(_) => UpdateValue::INT(buf.contents().get_int(offset)),
+            UpdateValue::STRING(_) => {
+                UpdateValue::STRING(buf.contents().get_string(offset).into_owned())
+            }
+        };
+        let block = buf.block().unwrap().clone();
+        // todo: verify
+        LogRecord::Update {
+            value: old_val,
+            txn_num: self.txn_num,
+            offset,
+            block,
+        }
+        .write_to_log(&self.lm)
+    }
+
+    fn do_rollback(&self) {
+        let itr = self.lm.iterator();
+        for bytes in itr {
+            let record = LogRecord::new(bytes).expect("valid record");
+            if record.txn_num().is_some_and(|x| x == self.txn_num) {
+                if record.operation() == RecordType::Start {
+                    return;
+                }
+                record.undo(&self.txn);
+            }
+        }
+    }
+
+    fn do_recover(&self) {
+        let itr = self.lm.iterator();
+        let mut finished_txns = Vec::new();
+
+        for bytes in itr {
+            let record = LogRecord::new(bytes).expect("valid record");
+            match record.operation() {
+                RecordType::Checkpoint => return,
+                RecordType::Commit | RecordType::Rollback => {
+                    finished_txns.push(record.txn_num().unwrap());
+                }
+                _ => {
+                    if !finished_txns.contains(&record.txn_num().unwrap()) {
+                        record.undo(&self.txn);
+                    }
+                }
+            }
+        }
+    }
 }
 
+#[derive(PartialEq)]
 enum RecordType {
     Checkpoint = 0,
     Start = 1,
@@ -150,7 +243,8 @@ impl LogRecord {
         }
     }
 
-    fn undo(&self, txn_num: usize) { // ? usize or Txn object
+    fn undo(&self, txn_num: &Arc<Transaction>) {
+        // ? usize or Txn object
         match &self {
             LogRecord::Checkpoint {}
             | LogRecord::Start { .. }
@@ -165,7 +259,7 @@ impl LogRecord {
         }
     }
 
-    fn write_to_log(&self, lm: Arc<LogManager>) -> Lsn {
+    fn write_to_log(&self, lm: &Arc<LogManager>) -> Lsn {
         let op = self.operation();
 
         match &self {

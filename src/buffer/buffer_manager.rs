@@ -12,7 +12,7 @@ use crate::{
 
 use super::replacer::{EvictionPolicy, Replacer};
 
-struct Buffer {
+pub struct Buffer {
     fm: Arc<FileManager>,
     lm: Arc<LogManager>,
     contents: Page,
@@ -42,11 +42,15 @@ impl Buffer {
         }
     }
 
-    fn contents(&mut self) -> &mut Page {
+    pub fn contents(&self) -> &Page {
+        &self.contents
+    }
+
+    pub fn contents_mut(&mut self) -> &mut Page {
         &mut self.contents
     }
 
-    fn block(&self) -> Option<&BlockId> {
+    pub fn block(&self) -> Option<&BlockId> {
         self.block.as_ref()
     }
 
@@ -203,7 +207,7 @@ impl BufferManager {
         state.free_list.len() + state.replacer.available()
     }
 
-    fn flush_all(&self, txn_num: usize) {
+    pub fn flush_all(&self, txn_num: usize) {
         let state = self.state.read().unwrap();
         state.flush_all(txn_num);
     }
@@ -250,7 +254,7 @@ mod tests {
 
         let buf1_lock = bm.pin(&BlockId::new(fname, 1)).unwrap();
         let mut buf1 = buf1_lock.write().unwrap();
-        let p = buf1.contents();
+        let p = buf1.contents_mut();
 
         let n = p.get_int(80);
         assert_eq!(n, 0);
@@ -281,7 +285,7 @@ mod tests {
 
         let buf2_lock = bm.pin(&BlockId::new(fname, 2)).unwrap();
         let mut buf2 = buf2_lock.write().unwrap();
-        let p2 = buf2.contents();
+        let p2 = buf2.contents_mut();
 
         // this modification won't get written to disk
         p2.set_int(80, 9999);
