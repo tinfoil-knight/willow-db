@@ -17,7 +17,7 @@ enum Lock {
     SLock(usize),
 }
 
-struct LockTable {
+pub struct LockTable {
     locks: Mutex<HashMap<BlockId, Lock>>,
     cvar: Condvar,
 }
@@ -25,9 +25,16 @@ struct LockTable {
 type LockGuard<'a> = MutexGuard<'a, HashMap<BlockId, Lock>>;
 
 impl LockTable {
+    pub fn new() -> Self {
+        Self {
+            locks: Mutex::new(HashMap::new()),
+            cvar: Condvar::new(),
+        }
+    }
+
     /// Tries to acquire a shared lock on the specified block.
     /// If return value is `true` then lock was acquired.
-    pub fn s_lock(&self, block: &BlockId) -> bool {
+    pub fn s_lock(&self, block: &BlockId) -> Result<(), &str> {
         let mut map = self.locks.lock().unwrap();
         let start = Instant::now();
 
@@ -37,7 +44,7 @@ impl LockTable {
         }
 
         if Self::has_x_lock(&map, block) {
-            return false;
+            return Err("lock aborted");
         }
 
         let new_val = match map.get(block) {
@@ -46,12 +53,14 @@ impl LockTable {
         };
         map.insert(block.to_owned(), new_val);
 
-        true
+        Ok(())
     }
 
     /// Tries to acquire an exclusive lock on the specified block.
     /// If return value is `true` then lock was acquired.
-    pub fn x_lock(&self, block: &BlockId) -> bool {
+    ///
+    /// This method assumes that a shared lock has already been acquired for the block.
+    pub fn x_lock(&self, block: &BlockId) -> Result<(), &str> {
         let mut map = self.locks.lock().unwrap();
         let start = Instant::now();
 
@@ -61,12 +70,12 @@ impl LockTable {
         }
 
         if Self::has_other_s_locks(&map, block) {
-            return false;
+            return Err("lock aborted");
         }
 
         map.insert(block.to_owned(), Lock::XLock);
 
-        true
+        Ok(())
     }
 
     /// Releases a lock on the specified block.
