@@ -9,60 +9,45 @@ use crate::{
     log::{LogManager, Lsn},
 };
 
-use super::transaction::Transaction;
+use super::transaction::{Transaction, TxNum};
 
-struct RecoveryManager {
+pub(super) struct RecoveryManager {
     lm: Arc<LogManager>,
     bm: Arc<BufferManager>,
-    txn: Arc<Transaction>,
-    txn_num: usize,
 }
 
 impl RecoveryManager {
-    fn new(
-        txn: Arc<Transaction>,
-        txn_num: usize,
-        lm: Arc<LogManager>,
-        bm: Arc<BufferManager>,
-    ) -> Self {
-        LogRecord::Start { txn_num }.write_to_log(&lm);
-        Self {
-            lm,
-            bm,
-            txn,
-            txn_num,
-        }
+    pub fn new(lm: Arc<LogManager>, bm: Arc<BufferManager>) -> Self {
+        Self { lm, bm }
     }
 
-    fn commit(&self) {
-        self.bm.flush_all(self.txn_num);
-        let lsn = LogRecord::Commit {
-            txn_num: self.txn_num,
-        }
-        .write_to_log(&self.lm);
+    pub fn start(&self, txn_num: TxNum) {
+        LogRecord::Start { txn_num }.write_to_log(&self.lm);
+    }
+
+    pub fn commit(&self, txn_num: TxNum) {
+        self.bm.flush_all(txn_num);
+        let lsn = LogRecord::Commit { txn_num }.write_to_log(&self.lm);
         self.lm.flush(lsn);
     }
 
-    fn rollback(&self) {
-        self.do_rollback();
+    pub fn rollback(&self, txn_num: TxNum, txn: &mut Transaction) {
+        self.do_rollback(txn_num, txn);
 
-        self.bm.flush_all(self.txn_num);
-        let lsn = LogRecord::Rollback {
-            txn_num: self.txn_num,
-        }
-        .write_to_log(&self.lm);
+        self.bm.flush_all(txn_num);
+        let lsn = LogRecord::Rollback { txn_num }.write_to_log(&self.lm);
         self.lm.flush(lsn);
     }
 
-    fn recover(&self) {
-        self.do_recover();
+    pub fn recover(&self, txn_num: TxNum, txn: &mut Transaction) {
+        self.do_recover(txn);
 
-        self.bm.flush_all(self.txn_num);
+        self.bm.flush_all(txn_num);
         let lsn = LogRecord::Checkpoint {}.write_to_log(&self.lm);
         self.lm.flush(lsn);
     }
 
-    fn set_update(&self, buf: Buffer, offset: usize, new_val: UpdateValue) -> Lsn {
+    pub fn set_update(&self, txn_num: TxNum, buf: &Buffer, offset: usize, new_val: UpdateValue) -> Lsn {
         let old_val = match new_val {
             UpdateValue::INT(_) => UpdateValue::INT(buf.contents().get_int(offset)),
             UpdateValue::STRING(_) => {
@@ -72,27 +57,27 @@ impl RecoveryManager {
         let block = buf.block().unwrap().clone();
         LogRecord::Update {
             value: old_val,
-            txn_num: self.txn_num,
+            txn_num,
             offset,
             block,
         }
         .write_to_log(&self.lm)
     }
 
-    fn do_rollback(&self) {
+    fn do_rollback(&self, txn_num: TxNum, txn: &mut Transaction) {
         let itr = self.lm.iterator();
         for bytes in itr {
             let record = LogRecord::new(bytes).expect("valid record");
-            if record.txn_num().is_some_and(|x| x == self.txn_num) {
+            if record.txn_num().is_some_and(|x| x == txn_num) {
                 if record.operation() == RecordType::Start {
                     return;
                 }
-                record.undo(&self.txn);
+                record.undo(txn);
             }
         }
     }
 
-    fn do_recover(&self) {
+    fn do_recover(&self, txn: &mut Transaction) {
         let itr = self.lm.iterator();
         let mut finished_txns = Vec::new();
 
@@ -105,7 +90,7 @@ impl RecoveryManager {
                 }
                 _ => {
                     if !finished_txns.contains(&record.txn_num().unwrap()) {
-                        record.undo(&self.txn);
+                        record.undo(txn);
                     }
                 }
             }
@@ -156,6 +141,7 @@ impl TryFrom<i32> for UpdateValueType {
 }
 
 #[allow(clippy::upper_case_acronyms)]
+#[derive(Clone)]
 pub enum UpdateValue {
     INT(i32),
     STRING(String),
@@ -300,7 +286,7 @@ impl LogRecord {
         }
     }
 
-    fn undo(&self, txn: &Arc<Transaction>) {
+    fn undo(&self, txn: &mut Transaction) {
         match &self {
             LogRecord::Checkpoint {}
             | LogRecord::Start { .. }

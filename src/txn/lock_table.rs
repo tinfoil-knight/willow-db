@@ -8,6 +8,8 @@ use std::{
 
 use crate::file::BlockId;
 
+use super::transaction::TxNum;
+
 const MAX_TIME: Duration = Duration::from_secs(10);
 
 enum Lock {
@@ -17,12 +19,12 @@ enum Lock {
     SLock(usize),
 }
 
-pub struct LockTable {
-    locks: Mutex<HashMap<BlockId, Lock>>,
+pub(super) struct LockTable {
+    locks: Mutex<HashMap<TxNum, HashMap<BlockId, Lock>>>,
     cvar: Condvar,
 }
 
-type LockGuard<'a> = MutexGuard<'a, HashMap<BlockId, Lock>>;
+type LockGuard<'a> = MutexGuard<'a, HashMap<TxNum, HashMap<BlockId, Lock>>>;
 
 impl LockTable {
     pub fn new() -> Self {
@@ -34,24 +36,26 @@ impl LockTable {
 
     /// Tries to acquire a shared lock on the specified block.
     /// If return value is `true` then lock was acquired.
-    pub fn s_lock(&self, block: &BlockId) -> Result<(), &str> {
+    pub fn s_lock(&self, txn_num: TxNum, block: &BlockId) -> Result<(), &str> {
         let mut map = self.locks.lock().unwrap();
         let start = Instant::now();
 
-        while Self::has_x_lock(&map, block) && !Self::waiting_too_long(start) {
+        while Self::has_x_lock(&map, txn_num, block) && !Self::waiting_too_long(start) {
             let (guard, _) = self.cvar.wait_timeout(map, MAX_TIME).unwrap();
             map = guard;
         }
 
-        if Self::has_x_lock(&map, block) {
+        if Self::has_x_lock(&map, txn_num, block) {
             return Err("lock aborted");
         }
 
-        let new_val = match map.get(block) {
+        let new_val = match map.get(&txn_num).and_then(|x| x.get(block)) {
             Some(Lock::SLock(n)) => Lock::SLock(n + 1),
             _ => Lock::SLock(1),
         };
-        map.insert(block.to_owned(), new_val);
+        map.entry(txn_num)
+            .or_default()
+            .insert(block.to_owned(), new_val);
 
         Ok(())
     }
@@ -60,45 +64,49 @@ impl LockTable {
     /// If return value is `true` then lock was acquired.
     ///
     /// This method assumes that a shared lock has already been acquired for the block.
-    pub fn x_lock(&self, block: &BlockId) -> Result<(), &str> {
+    pub fn x_lock(&self, txn_num: TxNum, block: &BlockId) -> Result<(), &str> {
         let mut map = self.locks.lock().unwrap();
         let start = Instant::now();
 
-        while Self::has_other_s_locks(&map, block) && !Self::waiting_too_long(start) {
+        while Self::has_other_s_locks(&map, txn_num, block) && !Self::waiting_too_long(start) {
             let (guard, _) = self.cvar.wait_timeout(map, MAX_TIME).unwrap();
             map = guard;
         }
 
-        if Self::has_other_s_locks(&map, block) {
+        if Self::has_other_s_locks(&map, txn_num, block) {
             return Err("lock aborted");
         }
 
-        map.insert(block.to_owned(), Lock::XLock);
+        map.entry(txn_num)
+            .or_default()
+            .insert(block.to_owned(), Lock::XLock);
 
         Ok(())
     }
 
     /// Releases a lock on the specified block.
-    pub fn unlock(&self, block: &BlockId) {
+    pub fn unlock(&self, txn_num: TxNum, block: &BlockId) {
         let mut map = self.locks.lock().unwrap();
-        match map.get(block) {
+        map.entry(txn_num).and_modify(|x| match x.get(block) {
             Some(Lock::SLock(n)) if *n > 1 => {
                 let new_val = Lock::SLock(*n - 1);
-                map.insert(block.to_owned(), new_val);
+                x.insert(block.to_owned(), new_val);
             }
             _ => {
-                map.remove(block);
+                x.remove(block);
                 self.cvar.notify_all();
             }
-        }
+        });
     }
 
-    fn has_x_lock(map: &LockGuard, block: &BlockId) -> bool {
-        matches!(map.get(block), Some(Lock::XLock))
+    fn has_x_lock(map: &LockGuard, txn_num: TxNum, block: &BlockId) -> bool {
+        map.get(&txn_num)
+            .is_some_and(|x| matches!(x.get(block), Some(Lock::XLock)))
     }
 
-    fn has_other_s_locks(map: &LockGuard, block: &BlockId) -> bool {
-        matches!(map.get(block), Some(Lock::SLock(n)) if *n > 1)
+    fn has_other_s_locks(map: &LockGuard, txn_num: TxNum, block: &BlockId) -> bool {
+        map.get(&txn_num)
+            .is_some_and(|x| matches!(x.get(block), Some(Lock::SLock(n)) if *n > 1))
     }
 
     fn waiting_too_long(start: Instant) -> bool {

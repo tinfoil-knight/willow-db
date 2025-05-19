@@ -9,6 +9,8 @@ use crate::{
 };
 
 use super::recovery::UpdateValue;
+/// Transaction Number
+pub type TxNum = usize;
 
 pub struct Transaction {
     fm: Arc<FileManager>,
