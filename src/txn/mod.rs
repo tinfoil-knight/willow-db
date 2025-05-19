@@ -1,3 +1,3 @@
 mod recovery;
 mod transaction;
-mod concurrency;
+mod lock_table;
