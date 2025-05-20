@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, RwLockReadGuard},
+};
 
 use crate::{
     buffer::{Buffer, BufferManager},
@@ -11,43 +14,51 @@ use crate::{
 
 use super::transaction::{Transaction, TxNum};
 
-pub(super) struct RecoveryManager {
-    lm: Arc<LogManager>,
-    bm: Arc<BufferManager>,
-}
+pub(super) struct RecoveryManager {}
 
 impl RecoveryManager {
-    pub fn new(lm: Arc<LogManager>, bm: Arc<BufferManager>) -> Self {
-        Self { lm, bm }
+    pub fn start(lm: &Arc<LogManager>, txn_num: TxNum) {
+        LogRecord::Start { txn_num }.write_to_log(lm);
     }
 
-    pub fn start(&self, txn_num: TxNum) {
-        LogRecord::Start { txn_num }.write_to_log(&self.lm);
+    pub fn commit(bm: &Arc<BufferManager>, lm: &Arc<LogManager>, txn_num: TxNum) {
+        bm.flush_all(txn_num);
+        let lsn = LogRecord::Commit { txn_num }.write_to_log(lm);
+        lm.flush(lsn);
     }
 
-    pub fn commit(&self, txn_num: TxNum) {
-        self.bm.flush_all(txn_num);
-        let lsn = LogRecord::Commit { txn_num }.write_to_log(&self.lm);
-        self.lm.flush(lsn);
+    pub fn rollback(
+        bm: &Arc<BufferManager>,
+        lm: &Arc<LogManager>,
+        txn_num: TxNum,
+        txn: &mut Transaction,
+    ) {
+        Self::do_rollback(lm, txn_num, txn);
+
+        bm.flush_all(txn_num);
+        let lsn = LogRecord::Rollback { txn_num }.write_to_log(lm);
+        lm.flush(lsn);
     }
 
-    pub fn rollback(&self, txn_num: TxNum, txn: &mut Transaction) {
-        self.do_rollback(txn_num, txn);
-
-        self.bm.flush_all(txn_num);
-        let lsn = LogRecord::Rollback { txn_num }.write_to_log(&self.lm);
-        self.lm.flush(lsn);
+    pub fn recover(
+        bm: &Arc<BufferManager>,
+        lm: &Arc<LogManager>,
+        txn_num: TxNum,
+        txn: &mut Transaction,
+    ) {
+        Self::do_recover(lm, txn);
+        bm.flush_all(txn_num);
+        let lsn = LogRecord::Checkpoint {}.write_to_log(lm);
+        lm.flush(lsn);
     }
 
-    pub fn recover(&self, txn_num: TxNum, txn: &mut Transaction) {
-        self.do_recover(txn);
-
-        self.bm.flush_all(txn_num);
-        let lsn = LogRecord::Checkpoint {}.write_to_log(&self.lm);
-        self.lm.flush(lsn);
-    }
-
-    pub fn set_update(&self, txn_num: TxNum, buf: &Buffer, offset: usize, new_val: UpdateValue) -> Lsn {
+    pub fn set_update(
+        lm: &Arc<LogManager>,
+        txn_num: TxNum,
+        buf: RwLockReadGuard<Buffer>,
+        offset: usize,
+        new_val: UpdateValue,
+    ) -> Lsn {
         let old_val = match new_val {
             UpdateValue::INT(_) => UpdateValue::INT(buf.contents().get_int(offset)),
             UpdateValue::STRING(_) => {
@@ -61,11 +72,11 @@ impl RecoveryManager {
             offset,
             block,
         }
-        .write_to_log(&self.lm)
+        .write_to_log(lm)
     }
 
-    fn do_rollback(&self, txn_num: TxNum, txn: &mut Transaction) {
-        let itr = self.lm.iterator();
+    fn do_rollback(lm: &Arc<LogManager>, txn_num: TxNum, txn: &mut Transaction) {
+        let itr = lm.iterator();
         for bytes in itr {
             let record = LogRecord::new(bytes).expect("valid record");
             if record.txn_num().is_some_and(|x| x == txn_num) {
@@ -77,8 +88,8 @@ impl RecoveryManager {
         }
     }
 
-    fn do_recover(&self, txn: &mut Transaction) {
-        let itr = self.lm.iterator();
+    fn do_recover(lm: &Arc<LogManager>, txn: &mut Transaction) {
+        let itr = lm.iterator();
         let mut finished_txns = Vec::new();
 
         for bytes in itr {
