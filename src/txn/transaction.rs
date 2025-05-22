@@ -199,3 +199,92 @@ impl TransactionManager {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::buffer::EvictionPolicy;
+
+    use super::*;
+
+    fn setup() -> TransactionManager {
+        let dirname = format!(
+            "{}_{}",
+            "txtest",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let dir_path = env::temp_dir().join(env!("CARGO_PKG_NAME")).join(dirname);
+        let fm = Arc::new(FileManager::new(&dir_path, 400));
+        let lm = Arc::new(LogManager::new(fm.clone(), "db.log"));
+        let bm = Arc::new(BufferManager::new(fm.clone(), lm.clone(), 20, EvictionPolicy::default()));
+
+        TransactionManager::new(fm, lm, bm)
+    }
+
+    #[test]
+    fn commit_then_rollback() {
+        let tm = setup();
+
+        let blk = BlockId::new("testfile", 1);
+
+        let mut tx1 = tm.create_txn();
+        tx1.pin(&blk);
+
+        tx1.set_value(&blk, 80, &UpdateValue::INT(1), false);
+        tx1.set_value(&blk, 40, &UpdateValue::STRING("one".into()), false);
+
+        tx1.commit();
+
+        // read-modify-commit
+
+        let mut tx2 = tm.create_txn();
+        tx2.pin(&blk);
+
+        let start_i = tx2.get_int(&blk, 80);
+        let start_s = tx2.get_string(&blk, 40);
+
+        assert_eq!(start_i, 1);
+        assert_eq!(start_s, "one");
+
+        tx2.set_value(&blk, 80, &UpdateValue::INT(start_i + 1), true);
+        tx2.set_value(&blk, 40, &UpdateValue::STRING(format!("{start_s}!")), true);
+
+        tx2.commit();
+
+        // overwrite then roll back
+
+        let mut tx3 = tm.create_txn();
+        tx3.pin(&blk);
+
+        let post_commit_i = tx3.get_int(&blk, 80);
+        let post_commit_s = tx3.get_string(&blk, 40);
+
+        assert_eq!(post_commit_i, 2, "commit from tx2 not visible");
+        assert_eq!(post_commit_s, "one!", "commit from tx2 not visible");
+
+        tx3.set_value(&blk, 80, &UpdateValue::INT(9999), true);
+        assert_eq!(tx3.get_int(&blk, 80), 9999, "write not visible to tx3");
+
+        tx3.rollback();
+
+        // verify rollback outcome
+
+        let mut tx4 = tm.create_txn();
+        tx4.pin(&blk);
+
+        let final_i = tx4.get_int(&blk, 80);
+        let final_s = tx4.get_string(&blk, 40);
+
+        assert_eq!(final_i, 2, "rollback did not restore int");
+        assert_eq!(final_s, "one!", "rollback did not restore string");
+
+        tx4.commit();
+    }
+}

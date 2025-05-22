@@ -24,7 +24,7 @@ impl RecoveryManager {
     pub fn commit(bm: &Arc<BufferManager>, lm: &Arc<LogManager>, txn_num: TxNum) {
         bm.flush_all(txn_num);
         let lsn = LogRecord::Commit { txn_num }.write_to_log(lm);
-        lm.flush(lsn);
+        lm.flush(Some(lsn));
     }
 
     pub fn rollback(
@@ -37,7 +37,7 @@ impl RecoveryManager {
 
         bm.flush_all(txn_num);
         let lsn = LogRecord::Rollback { txn_num }.write_to_log(lm);
-        lm.flush(lsn);
+        lm.flush(Some(lsn));
     }
 
     pub fn recover(
@@ -49,7 +49,7 @@ impl RecoveryManager {
         Self::do_recover(lm, txn);
         bm.flush_all(txn_num);
         let lsn = LogRecord::Checkpoint {}.write_to_log(lm);
-        lm.flush(lsn);
+        lm.flush(Some(lsn));
     }
 
     pub fn set_update(

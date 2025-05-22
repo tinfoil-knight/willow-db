@@ -67,7 +67,7 @@ impl LogManagerInner {
         // 1..n -> order in which the log was written (record1 was written first and so on..)
 
         let record_pos = boundary as usize - bytes_needed;
-        self.logpage.set_bytes(record_pos, &record);
+        self.logpage.set_bytes(record_pos, record);
         self.logpage.set_int(0, record_pos as i32);
 
         self.latest_lsn += 1;
@@ -104,7 +104,11 @@ impl LogManager {
     }
 
     /// Ensures that the content of the log are flushed at least till `lsn`.
-    pub fn flush(&self, lsn: Lsn) {
+    pub fn flush(&self, lsn: Option<Lsn>) {
+        let Some(lsn) = lsn else {
+            return;
+        };
+
         let last_saved_lsn = {
             let state = self.inner.read().unwrap();
             state.last_saved_lsn
@@ -236,7 +240,7 @@ mod tests {
         assert_eq!(records.len(), 20);
 
         lm.create_records(36, 70);
-        lm.flush(65);
+        lm.flush(Some(65));
 
         let records = lm.get_flushed_records();
         assert_eq!(records.len(), 70);

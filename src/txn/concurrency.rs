@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::{lock_table::LockTable, transaction::TxNum};
+use super::{lock_table::LockTable, TxNum};
 use crate::file::BlockId;
 
 enum LockType {

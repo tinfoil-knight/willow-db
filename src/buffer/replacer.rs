@@ -7,7 +7,7 @@ pub enum EvictionPolicy {
     LruK,
 }
 
-pub(super) trait Replacer {
+pub(super) trait Replacer: Send + Sync {
     fn record_access(&mut self, key: usize);
     fn evict(&mut self) -> Option<usize>;
     fn set_evictable(&mut self, key: usize, is_evictable: bool);

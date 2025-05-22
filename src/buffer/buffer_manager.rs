@@ -71,7 +71,7 @@ impl Buffer {
 
     fn flush(&mut self) {
         if self.txn_num.is_some() {
-            self.lm.flush(self.lsn.unwrap());
+            self.lm.flush(self.lsn);
             self.fm.write(self.block().unwrap(), &self.contents);
             self.txn_num = None
         }
